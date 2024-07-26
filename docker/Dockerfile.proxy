@@ -1,0 +1,17 @@
+FROM python:3.11-bookworm
+
+WORKDIR /workspace
+
+RUN pip install fastapi==0.111.0
+RUN pip install gunicorn==22.0
+RUN pip install ddtrace==2.9.3
+RUN pip install datadog-api-client==2.26.0
+RUN pip install debugpy==1.8.1
+
+COPY proxy.py proxy.py
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+# Add this line to print environment variables
+CMD ["gunicorn proxy:app --worker-class uvicorn.workers.UvicornWorker --workers 1 --bind 0.0.0.0:8000"]

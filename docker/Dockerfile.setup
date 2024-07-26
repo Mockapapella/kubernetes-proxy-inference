@@ -1,0 +1,23 @@
+FROM python:3.11-slim
+
+WORKDIR /workspace
+
+RUN pip install --no-cache-dir huggingface_hub==0.20.3 requests
+
+COPY utils/download_model_and_dataset.py ./
+
+# Create a non-root user with the same UID and GID as the host user
+ARG UID
+ARG GID
+RUN groupadd -g $GID appuser && \
+    useradd -m -u $UID -g $GID appuser
+
+# Ensure the /workspace directory and its subdirectories have the correct permissions and ownership
+RUN mkdir -p /workspace/models/nateraw/food /workspace/food101_data && \
+    chown -R appuser:appuser /workspace && \
+    chmod -R 777 /workspace
+
+# Switch to the non-root user
+USER appuser
+
+CMD ["python", "download_model_and_dataset.py"]
