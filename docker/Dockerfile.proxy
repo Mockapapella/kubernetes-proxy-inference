@@ -14,4 +14,4 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 # Add this line to print environment variables
-CMD ["gunicorn proxy:app --worker-class uvicorn.workers.UvicornWorker --workers 1 --bind 0.0.0.0:8000"]
+CMD ["gunicorn", "proxy:app", "--worker-class", "uvicorn.workers.UvicornWorker", "--workers", "1", "--bind", "0.0.0.0:8000"]
