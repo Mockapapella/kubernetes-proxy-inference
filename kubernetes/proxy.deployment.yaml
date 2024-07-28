@@ -1,0 +1,73 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: proxy-deployment
+  labels:
+    app: proxy
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: proxy
+  template:
+    metadata:
+      labels:
+        app: proxy
+      annotations:
+        ad.datadoghq.com/proxy.logs: '[{"source": "python", "service": "proxy"}]'
+    spec:
+      containers:
+      - name: proxy
+        image: registry.digitalocean.com/corelogic-cr-demo/proxy:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+        env:
+        - name: DD_AGENT_HOST
+          valueFrom:
+            fieldRef:
+              fieldPath: status.hostIP
+        - name: DD_TRACE_AGENT_PORT
+          value: "8126"
+        - name: DD_ENV
+          value: "production"
+        - name: DD_SERVICE
+          value: "proxy"
+        - name: DD_VERSION
+          value: "1.0.0"
+        - name: DD_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: datadog-secret
+              key: api-key
+        - name: DD_APP_KEY
+          valueFrom:
+            secretKeyRef:
+              name: datadog-secret
+              key: app-key
+        - name: DD_SITE
+          value: "us5.datadoghq.com"
+        - name: DD_LOGS_INJECTION
+          value: "true"
+        - name: DD_TRACE_ANALYTICS_ENABLED
+          value: "true"
+        - name: DD_APM_ENABLED
+          value: "true"
+        - name: DD_TRACE_DEBUG
+          value: "true"
+        - name: DD_TRACE_STARTUP_LOGS
+          value: "true"
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 20
+          periodSeconds: 10
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 15
+          failureThreshold: 3
