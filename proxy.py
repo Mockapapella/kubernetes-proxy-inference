@@ -16,96 +16,82 @@ from ddtrace import patch_all
 from ddtrace.profiling import Profiler
 from fastapi import FastAPI
 from fastapi import File
+from fastapi import HTTPException
 from fastapi import Request
 from fastapi import UploadFile
 from fastapi.responses import JSONResponse
 
-patch_all()
+app = FastAPI()
 
-# Configure Datadog tracing
+patch_all()
 config.env = os.getenv("DD_ENV", "production")
 config.service = os.getenv("DD_SERVICE", "proxy")
 config.version = os.getenv("DD_VERSION", "1.0.0")
+Profiler().start()
 
-# Start the profiler
-profiler = Profiler()
-profiler.start()
+dd_config = Configuration()
+dd_config.server_variables["site"] = os.getenv("DD_SITE", "us5.datadoghq.com")
+dd_config.api_key["apiKeyAuth"] = os.getenv("DD_API_KEY")
+dd_config.api_key["appKeyAuth"] = os.getenv("DD_APP_KEY")
 
-
-app = FastAPI()
-
-# Initialize Datadog configuration
-configuration = Configuration()
-configuration.server_variables["site"] = os.getenv("DD_SITE", "us5.datadoghq.com")
-configuration.api_key["apiKeyAuth"] = os.getenv("DD_API_KEY")
-configuration.api_key["appKeyAuth"] = os.getenv("DD_APP_KEY")
-
-print("Datadog configuration:")
-print(f"Site: {configuration.server_variables['site']}")
-print(
-    f"API Key: {'*' * len(configuration.api_key['apiKeyAuth']) if configuration.api_key['apiKeyAuth'] else 'Not set'}"
-)
-print(
-    f"APP Key: {'*' * len(configuration.api_key['appKeyAuth']) if configuration.api_key['appKeyAuth'] else 'Not set'}"
-)
+POD_ID = os.environ.get("HOSTNAME", "Unknown")
 
 
 @app.post("/classify/")
 async def proxy_classify(request: Request, file: UploadFile = File(...)):
     """Forwards image classification requests onto a beefy GPU server."""
-    inference_endpoint = "https://hqstk9y08by2lb-8001.proxy.runpod.net/classify/"
+    inference_endpoint = request.headers.get("X-Inference-Endpoint")
+    if not inference_endpoint:
+        raise HTTPException(status_code=400, detail="X-Inference-Endpoint header is required")
 
-    # Read the file content
     file_content = await file.read()
-
-    # Prepare the file for the POST request
     files = {"file": (file.filename, file_content, file.content_type)}
 
     async with httpx.AsyncClient() as client:
-        response = await client.post(inference_endpoint, files=files)
+        try:
+            response = await client.post(inference_endpoint, files=files, timeout=30.0)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise HTTPException(status_code=e.response.status_code, detail=str(e))
+        except httpx.RequestError as e:
+            raise HTTPException(
+                status_code=500, detail=f"Error requesting {inference_endpoint}: {str(e)}"
+            )
 
-    # Get the pod ID
-    pod_id = os.environ.get("HOSTNAME", "Unknown")
-
-    # Get the original response content
-    original_content = response.json()
-
-    # Add the pod ID to the response
-    modified_content = {"pod_id": pod_id, "original_response": original_content}
-
+    modified_content = {
+        "pod_id": POD_ID,
+        "original_response": response.json(),
+        "inference_endpoint": inference_endpoint,
+    }
     return JSONResponse(content=modified_content, status_code=response.status_code)
 
 
 @app.get("/health")
 async def health():
     """Keep track of service health."""
-    pod_id = os.environ.get("HOSTNAME", "Unknown")
+    metric = MetricPayload(
+        series=[
+            MetricSeries(
+                metric="proxy.health_check",
+                type=MetricIntakeType.COUNT,
+                points=[MetricPoint(timestamp=int(time.time()), value=1)],
+                tags=[
+                    f"pod:{POD_ID}",
+                    f"env:{config.env}",
+                    f"service:{config.service}",
+                    f"version:{config.version}",
+                ],
+            )
+        ]
+    )
 
-    # Send a custom metric to Datadog
-    with ApiClient(configuration) as api_client:
-        api_instance = MetricsApi(api_client)
-        current_time = int(time.time())
-        metric = MetricPayload(
-            series=[
-                MetricSeries(
-                    metric="proxy.health_check",
-                    type=MetricIntakeType.COUNT,
-                    points=[MetricPoint(timestamp=current_time, value=1)],
-                    tags=[
-                        f"pod:{pod_id}",
-                        f"env:{config.env}",
-                        f"service:{config.service}",
-                        f"version:{config.version}",
-                    ],
-                )
-            ]
-        )
-        try:
-            response = api_instance.submit_metrics(body=metric)
-            print(f"Metric submitted successfully. Response: {response}")
-        except Exception as e:
-            print(f"Error submitting metric to Datadog: {e}")
-            print(f"Attempted to submit: {metric.to_dict()}")
+    try:
+        with ApiClient(dd_config) as api_client:
+            response = MetricsApi(api_client).submit_metrics(body=metric)
+        print(f"Metric submitted successfully. Response: {response}")
+    except Exception as e:
+        print(f"Error submitting metric to Datadog: {e}")
+        print(f"Attempted to submit: {metric.to_dict()}")
 
     return {"status": "ok"}
 
