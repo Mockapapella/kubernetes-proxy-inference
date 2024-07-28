@@ -4,7 +4,9 @@ import io
 import logging
 import os
 import time
+from typing import Dict
 from typing import List
+from typing import Optional
 
 import torch
 from datadog_api_client import ApiClient
@@ -20,6 +22,8 @@ from fastapi import FastAPI
 from fastapi import File
 from fastapi import HTTPException
 from fastapi import UploadFile
+from nvitop import Device
+from nvitop import ResourceMetricCollector
 from PIL import Image
 from pydantic import BaseModel
 from transformers import pipeline
@@ -76,7 +80,9 @@ class ClassificationResponse(BaseModel):
     predictions: List[List[PredictionResponse]]
 
 
-def send_metric(metric_name, value, metric_type, tags=None):
+def send_metric(
+    metric_name: str, value: float, metric_type: MetricIntakeType, tags: Optional[List[str]] = None
+) -> None:
     """Send a metric to Datadog."""
     with ApiClient(dd_config) as api_client:
         api_instance = MetricsApi(api_client)
@@ -95,6 +101,64 @@ def send_metric(metric_name, value, metric_type, tags=None):
             logger.info(f"Sent metric {metric_name} to Datadog")
         except Exception as e:
             logger.error(f"Error sending metric to Datadog: {e}")
+
+
+class GPULogging:
+    """GPU Datadog Logger."""
+
+    def collect_gpu_metrics(self, metrics: Dict[str, float]) -> bool:
+        """Collect metrics from the GPU."""
+        for gpu in Device.all():
+            metric_mappings = {
+                "memory_percent": "memory_percent (%)",
+                "memory_free": "memory_free (MiB)",
+                "memory_total": "memory_total (MiB)",
+                "memory_used": "memory_used (MiB)",
+                "gpu_utilization": "gpu_utilization (%)",
+                "temperature": "temperature (C)",
+                "power_draw": "power_draw (W)",
+                "power_limit": "power_limit (W)",
+                "fan_speed": "fan_speed (%)",
+                "graphics_clock": "graphics_clock (MHz)",
+                "sm_clock": "sm_clock (MHz)",
+                "memory_clock": "memory_clock (MHz)",
+                "encoder_fps": "encoder_fps",
+                "encoder_latency": "encoder_latency (us)",
+            }
+
+            for metric_name, metric_key in metric_mappings.items():
+                full_metric_key = f"metrics-daemon/gpu:{gpu.index}/{metric_key}/mean"
+                if full_metric_key in metrics:
+                    try:
+                        send_metric(
+                            f"{DD_SERVICE}.{metric_name}",
+                            metrics[full_metric_key],
+                            MetricIntakeType.GAUGE,
+                            [f"gpu:{gpu.index}"],
+                        )
+                        logger.info(f"Sent metric {DD_SERVICE}.{metric_name} to Datadog")
+                    except Exception as e:
+                        logger.error(f"Error sending metric {metric_name} to Datadog: {e}")
+                else:
+                    logger.warning(f"Metric {metric_name} not available for GPU {gpu.index}")
+
+        return True
+
+    def start_gpu_metrics_monitor(self) -> None:
+        """Start logging GPU metrics."""
+        if DEVICE == "cpu":
+            logger.warning("No GPU found. Not logging.")
+            return
+        else:
+            ResourceMetricCollector(Device.all()).daemonize(
+                on_collect=self.collect_gpu_metrics,
+                interval=1,
+            )
+
+
+# Initialize GPU Monitor
+gpu_monitor = GPULogging()
+gpu_monitor.start_gpu_metrics_monitor()
 
 
 @app.post("/classify/")
@@ -119,7 +183,6 @@ async def classify(files: List[UploadFile] = File(...)):
         # Process results
         predictions = []
         for image_results in results:
-            # Take only the top prediction for each image
             top_prediction = max(image_results, key=lambda x: x["score"])
             predictions.append(
                 {"label": top_prediction["label"], "score": float(top_prediction["score"])}
@@ -134,7 +197,7 @@ async def classify(files: List[UploadFile] = File(...)):
             [f"env:{DD_ENV}", f"model:{MODEL_PATH}"],
         )
         send_metric(
-            "inference.requests",
+            "inference.images_processed",
             len(files),
             MetricIntakeType.COUNT,
             [f"env:{DD_ENV}", f"model:{MODEL_PATH}"],
