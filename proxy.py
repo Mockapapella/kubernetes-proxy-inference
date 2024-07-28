@@ -2,6 +2,7 @@
 
 import os
 import time
+from typing import List
 
 import httpx
 from datadog_api_client import ApiClient
@@ -38,22 +39,31 @@ POD_ID = os.environ.get("HOSTNAME", "Unknown")
 
 
 @app.post("/classify/")
-async def proxy_classify(request: Request, file: UploadFile = File(...)):
-    """Forwards image classification requests onto a beefy GPU server."""
+async def proxy_classify(request: Request, files: List[UploadFile] = File(...)):
+    """Forwards image classification requests onto the inference server."""
+    print(f"Received request to /classify/ with {len(files)} files")
+    for file in files:
+        print(f"File: {file.filename}, Content-Type: {file.content_type}")
+
     inference_endpoint = request.headers.get("X-Inference-Endpoint")
     if not inference_endpoint:
         raise HTTPException(status_code=400, detail="X-Inference-Endpoint header is required")
 
-    file_content = await file.read()
-    files = {"file": (file.filename, file_content, file.content_type)}
-
     async with httpx.AsyncClient() as client:
         try:
-            response = await client.post(inference_endpoint, files=files, timeout=30.0)
+            # Prepare files for the request
+            files_data = [
+                ("files", (file.filename, await file.read(), file.content_type)) for file in files
+            ]
+
+            # Forward the request to the inference server
+            response = await client.post(inference_endpoint, files=files_data, timeout=60.0)
             response.raise_for_status()
         except httpx.HTTPStatusError as e:
+            print(f"HTTP Status Error: {e}")
             raise HTTPException(status_code=e.response.status_code, detail=str(e))
         except httpx.RequestError as e:
+            print(f"Request Error: {e}")
             raise HTTPException(
                 status_code=500, detail=f"Error requesting {inference_endpoint}: {str(e)}"
             )
@@ -69,6 +79,7 @@ async def proxy_classify(request: Request, file: UploadFile = File(...)):
 @app.get("/health")
 async def health():
     """Keep track of service health."""
+    print("Health check requested")
     metric = MetricPayload(
         series=[
             MetricSeries(
@@ -99,4 +110,5 @@ async def health():
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    print("Starting server...")
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")

@@ -4,7 +4,6 @@ import argparse
 import io
 import logging
 import random
-from pathlib import Path
 
 import matplotlib.pyplot as plt
 import requests
@@ -125,26 +124,34 @@ CLASS_MAPPING = {
 }
 
 
-def classify_image(image_path, mode):
+def classify_images(images, mode):
     """Send an image to the API and return results."""
     url = API_ENDPOINTS[mode]
     inference_endpoint = API_ENDPOINTS["direct"] if mode != "direct" else None
 
-    with open(image_path, "rb") as img_file:
-        files = {"file": ("image.jpg", img_file, "image/jpeg")}
-        headers = {"X-Inference-Endpoint": inference_endpoint} if inference_endpoint else {}
-        try:
-            response = requests.post(url, files=files, headers=headers, timeout=30)
-            response.raise_for_status()
-            result = response.json()
-            predictions = result.get("predictions") or result.get("original_response", {}).get(
-                "predictions"
-            )
-            assert predictions
-            return predictions[0]  # Return only the top prediction
-        except requests.RequestException as e:
-            logger.error(f"API request failed: {e}")
-            raise
+    # Prepare multiple images
+    files = []
+    for i, image in enumerate(images):
+        img_byte_arr = io.BytesIO()
+        image.save(img_byte_arr, format="JPEG")
+        img_byte_arr.seek(0)
+        files.append(("files", (f"image_{i}.jpg", img_byte_arr, "image/jpeg")))
+
+    headers = {"X-Inference-Endpoint": inference_endpoint} if inference_endpoint else {}
+
+    try:
+        response = requests.post(url, files=files, headers=headers, timeout=60)
+        response.raise_for_status()
+        result = response.json()
+        if mode == "direct":
+            predictions = result.get("predictions")
+        elif mode == "proxy":
+            predictions = result.get("original_response", {}).get("predictions")
+        assert predictions is not None
+        return predictions
+    except requests.RequestException as e:
+        logger.error(f"API request failed: {e}")
+        raise
 
 
 def display_image(image, true_label):
@@ -156,37 +163,53 @@ def display_image(image, true_label):
     plt.show(block=True)
 
 
-def main(mode, data_path):
+def main(mode, data_path, num_images=1):
     """Main function for handling the request to the API."""
     try:
         dataset = load_dataset("parquet", data_files={"validation": data_path})["validation"]
-        random_example = dataset[random.randint(0, len(dataset) - 1)]
+        random_examples = random.sample(range(len(dataset)), num_images)
 
-        image = random_example["image"]
-        true_label = random_example["label"]
+        images = []
+        true_labels = []
+        for idx in random_examples:
+            images.append(dataset[idx]["image"])
+            true_labels.append(dataset[idx]["label"])
 
-        logger.info(f"Image dimensions: {image.width}x{image.height}")
-        logger.info(f"True label: {CLASS_MAPPING[true_label]} (ID: {true_label})")
+        logger.info(f"Classifying {num_images} image{'s' if num_images > 1 else ''}")
 
-        display_image(image, true_label)
+        predictions = classify_images(images, mode)
 
-        with io.BytesIO() as buffer:
-            image.save(buffer, format="JPEG")
-            buffer.seek(0)
-            temp_image_path = Path("temp_image.jpg")
-            with open(temp_image_path, "wb") as f:
-                f.write(buffer.getvalue())
+        if not isinstance(predictions, list) or len(predictions) != num_images:
+            raise ValueError(
+                f"Expected {num_images} predictions, but got {len(predictions) if isinstance(predictions, list) else type(predictions)}"
+            )
 
-        prediction = classify_image(temp_image_path, mode)
+        for i, (image, true_label, prediction) in enumerate(zip(images, true_labels, predictions)):
+            logger.info(f"\nImage {i+1}/{num_images}")
+            logger.info(f"Image dimensions: {image.width}x{image.height}")
+            logger.info(f"True label: {CLASS_MAPPING[true_label]} (ID: {true_label})")
 
-        predicted_label = prediction["label"]
-        predicted_score = prediction["score"]
-        logger.info(f"Top prediction: {predicted_label} (Score: {predicted_score:.4f})")
+            # Uncomment the next line if you want to display each image
+            display_image(image, true_label)
 
-        is_correct = predicted_label == CLASS_MAPPING[true_label]
-        logger.info(f"Classification {'correct' if is_correct else 'incorrect'}")
+            if isinstance(prediction, list) and len(prediction) > 0:
+                prediction = prediction[0]  # Take the first prediction if it's a list
 
-        temp_image_path.unlink()  # Clean up temporary file
+            if (
+                not isinstance(prediction, dict)
+                or "label" not in prediction
+                or "score" not in prediction
+            ):
+                logger.error(f"Unexpected prediction format: {prediction}")
+                continue
+
+            predicted_label = prediction["label"]
+            predicted_score = prediction["score"]
+            logger.info(f"Top prediction: {predicted_label} (Score: {predicted_score:.4f})")
+
+            is_correct = predicted_label == CLASS_MAPPING[true_label]
+            logger.info(f"Classification {'correct' if is_correct else 'incorrect'}")
+
     except Exception as e:
         logger.exception(f"An error occurred: {e}")
 
@@ -202,6 +225,12 @@ if __name__ == "__main__":
         default="./food101_data/data/validation-*.parquet",
         help="Path to validation data",
     )
+    parser.add_argument(
+        "--num_images",
+        type=int,
+        default=1,
+        help="Number of images to classify (default: 1, max: 200)",
+    )
     args = parser.parse_args()
 
-    main(args.mode, args.data_path)
+    main(args.mode, args.data_path, args.num_images)

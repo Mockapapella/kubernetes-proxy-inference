@@ -1,9 +1,10 @@
-"""AI Image classification API. Works on both GPU and CPU."""
+"""AI Image classification API with batch processing. Works on both GPU and CPU."""
 
 import io
 import logging
 import os
 import time
+from typing import List
 
 import torch
 from datadog_api_client import ApiClient
@@ -20,6 +21,7 @@ from fastapi import File
 from fastapi import HTTPException
 from fastapi import UploadFile
 from PIL import Image
+from pydantic import BaseModel
 from transformers import pipeline
 
 # Configure logging
@@ -54,6 +56,26 @@ food_classifier = pipeline("image-classification", model=MODEL_PATH, device=DEVI
 logger.info("Model initialization complete")
 
 
+# Pydantic models for request and response
+class ClassificationRequest(BaseModel):
+    """Request format for a classification request."""
+
+    images: List[UploadFile]
+
+
+class PredictionResponse(BaseModel):
+    """Format for an individual prediction."""
+
+    label: str
+    score: float
+
+
+class ClassificationResponse(BaseModel):
+    """Final response format for a series of images."""
+
+    predictions: List[List[PredictionResponse]]
+
+
 def send_metric(metric_name, value, metric_type, tags=None):
     """Send a metric to Datadog."""
     with ApiClient(dd_config) as api_client:
@@ -76,20 +98,32 @@ def send_metric(metric_name, value, metric_type, tags=None):
 
 
 @app.post("/classify/")
-async def classify(file: UploadFile = File(...)):
-    """Classify food in the uploaded image."""
-    logger.info(f"Received classification request for file: {file.filename}")
-    if not file:
-        logger.error("No file provided for classification")
-        raise HTTPException(status_code=400, detail="No file provided for classification.")
+async def classify(files: List[UploadFile] = File(...)):
+    """Classify food in one or multiple uploaded images."""
+    logger.info(f"Received classification request for {len(files)} file(s)")
+    if not files:
+        logger.error("No files provided for classification")
+        raise HTTPException(status_code=400, detail="No files provided for classification.")
+
     try:
         start_time = time.time()
-        contents = await file.read()
-        image = Image.open(io.BytesIO(contents)).convert("RGB")
-        results = food_classifier(image)
-        predictions = [
-            {"label": result["label"], "score": float(result["score"])} for result in results
-        ]
+        images = []
+        for file in files:
+            contents = await file.read()
+            image = Image.open(io.BytesIO(contents)).convert("RGB")
+            images.append(image)
+
+        # Perform batch inference
+        results = food_classifier(images, batch_size=len(images))
+
+        # Process results
+        predictions = []
+        for image_results in results:
+            # Take only the top prediction for each image
+            top_prediction = max(image_results, key=lambda x: x["score"])
+            predictions.append(
+                {"label": top_prediction["label"], "score": float(top_prediction["score"])}
+            )
 
         # Calculate and send metrics
         process_time = time.time() - start_time
@@ -101,12 +135,12 @@ async def classify(file: UploadFile = File(...)):
         )
         send_metric(
             "inference.requests",
-            1,
+            len(files),
             MetricIntakeType.COUNT,
             [f"env:{DD_ENV}", f"model:{MODEL_PATH}"],
         )
 
-        logger.info(f"Successfully classified image. Top prediction: {predictions[0]['label']}")
+        logger.info(f"Successfully classified {len(files)} image(s)")
         return {"predictions": predictions}
     except Exception as e:
         logger.error(f"Error during classification: {str(e)}")
