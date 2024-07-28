@@ -20,7 +20,8 @@ from fastapi import File
 from fastapi import HTTPException
 from fastapi import Request
 from fastapi import UploadFile
-from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from pydantic import Field
 
 app = FastAPI()
 
@@ -38,7 +39,29 @@ dd_config.api_key["appKeyAuth"] = os.getenv("DD_APP_KEY")
 POD_ID = os.environ.get("HOSTNAME", "Unknown")
 
 
-@app.post("/classify/")
+# Pydantic models
+class PredictionResponse(BaseModel):
+    """Format for an individual prediction."""
+
+    label: str
+    score: float
+
+
+class ClassificationResponse(BaseModel):
+    """Response format for a series of images."""
+
+    predictions: List[PredictionResponse]
+
+
+class ProxyResponse(BaseModel):
+    """Response format for the proxy, including metadata."""
+
+    pod_id: str
+    original_response: ClassificationResponse
+    inference_endpoint: str
+
+
+@app.post("/classify/", response_model=ProxyResponse)
 async def proxy_classify(request: Request, files: List[UploadFile] = File(...)):
     """Forwards image classification requests onto the inference server."""
     print(f"Received request to /classify/ with {len(files)} files")
@@ -51,12 +74,9 @@ async def proxy_classify(request: Request, files: List[UploadFile] = File(...)):
 
     async with httpx.AsyncClient() as client:
         try:
-            # Prepare files for the request
             files_data = [
                 ("files", (file.filename, await file.read(), file.content_type)) for file in files
             ]
-
-            # Forward the request to the inference server
             response = await client.post(inference_endpoint, files=files_data, timeout=60.0)
             response.raise_for_status()
         except httpx.HTTPStatusError as e:
@@ -68,15 +88,20 @@ async def proxy_classify(request: Request, files: List[UploadFile] = File(...)):
                 status_code=500, detail=f"Error requesting {inference_endpoint}: {str(e)}"
             )
 
-    modified_content = {
-        "pod_id": POD_ID,
-        "original_response": response.json(),
-        "inference_endpoint": inference_endpoint,
-    }
-    return JSONResponse(content=modified_content, status_code=response.status_code)
+    original_response = ClassificationResponse(**response.json())
+    proxy_response = ProxyResponse(
+        pod_id=POD_ID, original_response=original_response, inference_endpoint=inference_endpoint
+    )
+    return proxy_response
 
 
-@app.get("/health")
+class HealthResponse(BaseModel):
+    """Response format for the health check endpoint."""
+
+    status: str = Field(..., example="ok")
+
+
+@app.get("/health", response_model=HealthResponse)
 async def health():
     """Keep track of service health."""
     print("Health check requested")
@@ -104,7 +129,7 @@ async def health():
         print(f"Error submitting metric to Datadog: {e}")
         print(f"Attempted to submit: {metric.to_dict()}")
 
-    return {"status": "ok"}
+    return HealthResponse(status="ok")
 
 
 if __name__ == "__main__":
