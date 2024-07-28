@@ -1,6 +1,7 @@
 """AI Image classification API. Works on both GPU and CPU."""
 
 import io
+import logging
 import os
 import time
 
@@ -12,110 +13,127 @@ from datadog_api_client.v2.model.metric_intake_type import MetricIntakeType
 from datadog_api_client.v2.model.metric_payload import MetricPayload
 from datadog_api_client.v2.model.metric_point import MetricPoint
 from datadog_api_client.v2.model.metric_series import MetricSeries
-from ddtrace import config
 from ddtrace import patch_all
 from ddtrace.profiling import Profiler
 from fastapi import FastAPI
 from fastapi import File
 from fastapi import HTTPException
 from fastapi import UploadFile
-from fastapi.responses import JSONResponse
 from PIL import Image
-from transformers import AutoFeatureExtractor
-from transformers import AutoModelForImageClassification
 from transformers import pipeline
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 patch_all()
 
-# Configure Datadog tracing
-config.env = os.getenv("DD_ENV", "production")
-config.service = os.getenv("DD_SERVICE", "inference")
-config.version = os.getenv("DD_VERSION", "1.0.0")
+# Configuration
+MODEL_PATH = "/workspace/models/nateraw/food"
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+DD_ENV = os.getenv("DD_ENV", "production")
+DD_SERVICE = os.getenv("DD_SERVICE", "inference")
+DD_VERSION = os.getenv("DD_VERSION", "1.0.0")
+DD_SITE = os.getenv("DD_SITE", "us5.datadoghq.com")
+DD_API_KEY = os.getenv("DD_API_KEY")
 
-# Start the profiler
-profiler = Profiler()
-profiler.start()
-
-# Setting up model pipeline
-local_model_path = "/workspace/models/nateraw/food"
-model = AutoModelForImageClassification.from_pretrained(local_model_path)
-feature_extractor = AutoFeatureExtractor.from_pretrained(local_model_path)
-device = 0 if torch.cuda.is_available() else -1
-food_classifier = pipeline(
-    "image-classification", model=model, feature_extractor=feature_extractor, device=device
-)
-
+# Initialize FastAPI
 app = FastAPI()
 
-# Initialize Datadog configuration
-configuration = Configuration()
-configuration.server_variables["site"] = os.getenv("DD_SITE", "us5.datadoghq.com")
-configuration.api_key["apiKeyAuth"] = os.getenv("DD_API_KEY")
+# Initialize Datadog
+Profiler().start()
+dd_config = Configuration()
+dd_config.server_variables["site"] = DD_SITE
+dd_config.api_key["apiKeyAuth"] = DD_API_KEY
 
-print("Datadog configuration:")
-print(f"Site: {configuration.server_variables['site']}")
-print(
-    f"API Key: {'*' * len(configuration.api_key['apiKeyAuth']) if configuration.api_key['apiKeyAuth'] else 'Not set'}"
-)
+# Initialize model
+logger.info(f"Initializing model from {MODEL_PATH} on device {DEVICE}")
+food_classifier = pipeline("image-classification", model=MODEL_PATH, device=DEVICE)
+logger.info("Model initialization complete")
+
+
+def send_metric(metric_name, value, metric_type, tags=None):
+    """Send a metric to Datadog."""
+    with ApiClient(dd_config) as api_client:
+        api_instance = MetricsApi(api_client)
+        metric = MetricPayload(
+            series=[
+                MetricSeries(
+                    metric=metric_name,
+                    type=metric_type,
+                    points=[MetricPoint(timestamp=int(time.time()), value=value)],
+                    tags=tags or [],
+                )
+            ]
+        )
+        try:
+            api_instance.submit_metrics(body=metric)
+            logger.info(f"Sent metric {metric_name} to Datadog")
+        except Exception as e:
+            logger.error(f"Error sending metric to Datadog: {e}")
 
 
 @app.post("/classify/")
-async def classify_food(file: UploadFile = File(...)):
+async def classify(file: UploadFile = File(...)):
     """Classify food in the uploaded image."""
-    print(f"Received image: {file.filename}")
+    logger.info(f"Received classification request for file: {file.filename}")
     if not file:
+        logger.error("No file provided for classification")
         raise HTTPException(status_code=400, detail="No file provided for classification.")
     try:
+        start_time = time.time()
         contents = await file.read()
         image = Image.open(io.BytesIO(contents)).convert("RGB")
-
         results = food_classifier(image)
-
         predictions = [
             {"label": result["label"], "score": float(result["score"])} for result in results
         ]
 
-        return JSONResponse(content={"predictions": predictions})
+        # Calculate and send metrics
+        process_time = time.time() - start_time
+        send_metric(
+            "inference.process_time",
+            process_time,
+            MetricIntakeType.GAUGE,
+            [f"env:{DD_ENV}", f"model:{MODEL_PATH}"],
+        )
+        send_metric(
+            "inference.requests",
+            1,
+            MetricIntakeType.COUNT,
+            [f"env:{DD_ENV}", f"model:{MODEL_PATH}"],
+        )
+
+        logger.info(f"Successfully classified image. Top prediction: {predictions[0]['label']}")
+        return {"predictions": predictions}
     except Exception as e:
-        print(f"Error during classification: {str(e)}")
+        logger.error(f"Error during classification: {str(e)}")
+        send_metric(
+            "inference.errors", 1, MetricIntakeType.COUNT, [f"env:{DD_ENV}", f"model:{MODEL_PATH}"]
+        )
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/health")
 async def health():
     """Health check for the service."""
+    logger.info("Health check requested")
     pod_id = os.environ.get("HOSTNAME", "Unknown")
 
-    # Send a custom metric to Datadog
-    with ApiClient(configuration) as api_client:
-        api_instance = MetricsApi(api_client)
-        current_time = int(time.time())
-        metric = MetricPayload(
-            series=[
-                MetricSeries(
-                    metric="inference.health_check",
-                    type=MetricIntakeType.COUNT,
-                    points=[MetricPoint(timestamp=current_time, value=1)],
-                    tags=[
-                        f"pod:{pod_id}",
-                        f"env:{config.env}",
-                        f"service:{config.service}",
-                        f"version:{config.version}",
-                    ],
-                )
-            ]
-        )
-        try:
-            response = api_instance.submit_metrics(body=metric)
-            print(f"Metric submitted successfully. Response: {response}")
-        except Exception as e:
-            print(f"Error submitting metric to Datadog: {e}")
-            print(f"Attempted to submit: {metric.to_dict()}")
+    send_metric(
+        "inference.health_check",
+        1,
+        MetricIntakeType.COUNT,
+        [f"pod:{pod_id}", f"env:{DD_ENV}", f"service:{DD_SERVICE}", f"version:{DD_VERSION}"],
+    )
 
-    return {"message": "Welcome to the Food Classification API", "pod_id": pod_id}
+    return {"status": "healthy", "pod_id": pod_id, "model_device": DEVICE, "environment": DD_ENV}
 
 
 if __name__ == "__main__":
+    logger.info(f"Starting server in {DD_ENV} environment")
     import uvicorn
 
     uvicorn.run(app, host="0.0.0.0", port=8001)
