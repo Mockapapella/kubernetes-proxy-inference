@@ -143,7 +143,7 @@ def classify_images(images, mode):
         response = requests.post(url, files=files, headers=headers, timeout=60)
         response.raise_for_status()
         result = response.json()
-        if mode == "direct":
+        if mode == "direct" or mode == "local":
             predictions = result.get("predictions")
         elif mode == "proxy":
             predictions = result.get("original_response", {}).get("predictions")
@@ -190,7 +190,7 @@ def main(mode, data_path, num_images=1):
             logger.info(f"True label: {CLASS_MAPPING[true_label]} (ID: {true_label})")
 
             # Uncomment the next line if you want to display each image
-            display_image(image, true_label)
+            # display_image(image, true_label)
 
             if isinstance(prediction, list) and len(prediction) > 0:
                 prediction = prediction[0]  # Take the first prediction if it's a list
@@ -229,7 +229,7 @@ if __name__ == "__main__":
         "--num_images",
         type=int,
         default=1,
-        help="Number of images to classify (default: 1, max: 200)",
+        help="Number of images to classify (default: 1)",
     )
     args = parser.parse_args()
 

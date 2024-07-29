@@ -2,8 +2,6 @@
 include .env
 export
 
-.PHONY: run-inference run-inference-debug run-inference-test run-inference-test-debug run-proxy run-proxy-debug run-proxy-test run-proxy-test-debug
-
 # Inference Service
 run-inference:
 	docker build --build-arg DD_API_KEY=$(DD_API_KEY) -t inference -f docker/Dockerfile .
@@ -122,8 +120,6 @@ setup:
 	@chmod -R 755 models food101_data
 
 	@echo "Setup complete. Check the 'models/nateraw/food' and 'food101_data' directories for downloaded files."
-
-.PHONY: setup
 
 # Run precommit on any staged files
 precommit:

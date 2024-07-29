@@ -98,7 +98,7 @@ def send_metric(
         )
         try:
             api_instance.submit_metrics(body=metric)
-            logger.info(f"Sent metric {metric_name} to Datadog")
+            logger.info(f"Sent metric {metric_name} with value {value} to Datadog")
         except Exception as e:
             logger.error(f"Error sending metric to Datadog: {e}")
 
@@ -116,14 +116,7 @@ class GPULogging:
                 "memory_used": "memory_used (MiB)",
                 "gpu_utilization": "gpu_utilization (%)",
                 "temperature": "temperature (C)",
-                "power_draw": "power_draw (W)",
-                "power_limit": "power_limit (W)",
                 "fan_speed": "fan_speed (%)",
-                "graphics_clock": "graphics_clock (MHz)",
-                "sm_clock": "sm_clock (MHz)",
-                "memory_clock": "memory_clock (MHz)",
-                "encoder_fps": "encoder_fps",
-                "encoder_latency": "encoder_latency (us)",
             }
 
             for metric_name, metric_key in metric_mappings.items():
@@ -131,12 +124,11 @@ class GPULogging:
                 if full_metric_key in metrics:
                     try:
                         send_metric(
-                            f"{DD_SERVICE}.{metric_name}",
+                            f"inference.{metric_name}",
                             metrics[full_metric_key],
                             MetricIntakeType.GAUGE,
                             [f"gpu:{gpu.index}"],
                         )
-                        logger.info(f"Sent metric {DD_SERVICE}.{metric_name} to Datadog")
                     except Exception as e:
                         logger.error(f"Error sending metric {metric_name} to Datadog: {e}")
                 else:
