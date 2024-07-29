@@ -16,8 +16,6 @@ At a high level, this repo contains:
 1. Full Observability with DataDog
 1. GPU health monitoring
 
-All from within Docker.
-
 # Local Development
 
 Create a `.env` file with `DD_API_KEY=none` in it.

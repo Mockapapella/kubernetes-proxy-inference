@@ -147,6 +147,7 @@ def classify_images(images, mode):
             predictions = result.get("predictions")
         elif mode == "proxy":
             predictions = result.get("original_response", {}).get("predictions")
+            logger.info(f"Request handled by pod {result['pod_id']}")
         assert predictions is not None
         return predictions
     except requests.RequestException as e:
